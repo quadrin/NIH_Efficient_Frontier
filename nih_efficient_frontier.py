@@ -89,6 +89,22 @@ def efficient_frontier(roi_matrix):
 
     return roi_matrix.columns, w.value, mu, Sigma
 
+# Sweep lambda values to generate full efficient frontier curve
+def compute_efficient_frontier_curve(mu, Sigma):
+    risks, returns = [], []
+    for lam in np.linspace(0, 1, 50):
+        w = cp.Variable(len(mu))
+        risk = cp.quad_form(w, Sigma)
+        ret = mu @ w
+        prob = cp.Problem(cp.Maximize(ret - lam * risk), [cp.sum(w) == 1, w >= 0])
+        prob.solve()
+        if w.value is not None:
+            risks.append(np.sqrt(w.value.T @ Sigma @ w.value))
+            returns.append(ret.value)
+    return risks, returns
+
+
+
 # Streamlit UI
 st.title("NIH Efficient Frontier Explorer - Institute Level")
 st.markdown("Explore return on NIH investments by Institute using efficient frontier optimization.")
@@ -110,6 +126,17 @@ ax.set_xlabel("Risk (Std Dev)")
 ax.set_ylabel("Mean Return")
 ax.set_title("Risk vs Return by NIH Institute")
 st.pyplot(fig)
+
+st.subheader("Efficient Frontier Curve")
+risks_curve, returns_curve = compute_efficient_frontier_curve(mean_returns, cov_matrix)
+
+fig2, ax2 = plt.subplots()
+ax2.plot(risks_curve, returns_curve, marker='o')
+ax2.set_xlabel("Portfolio Risk (Std Dev)")
+ax2.set_ylabel("Portfolio Expected Return")
+ax2.set_title("Efficient Frontier Curve (NIH Portfolio)")
+ax2.grid(True)
+st.pyplot(fig2)
 
 st.download_button(
     label="Download Efficient Portfolio as CSV",
