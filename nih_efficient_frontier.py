@@ -3,6 +3,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import cvxpy as cp
 
 @st.cache_data
 
@@ -71,67 +72,66 @@ funding_long.dropna(subset=["Funding"], inplace=True)
 funding_long["Group"] = funding_long["Institute"].map(nih_to_bisias_group)
 funding_grouped = funding_long.dropna(subset=["Group"]).groupby(["Year", "Group"])["Funding"].sum().reset_index()
 
-# Calculate ROI across lag and window
-results = []
-for lag in range(9, 17):
-    for window in range(1, 6):
-        for year in range(1999, 2021 - lag - window):
-            current_funding = funding_grouped[funding_grouped["Year"] == year].copy()
-            impact_years = list(range(year + lag, year + lag + window + 1))
-            burden_window = burden_grouped[burden_grouped["Year"].isin(impact_years)]
-            burden_avg = burden_window.groupby("Group")["Burden"].mean().reset_index()
-            burden_prev = burden_grouped[burden_grouped["Year"] == (year + lag - 1)]
-            delta = burden_prev.merge(burden_avg, on="Group", suffixes=("_prev", "_future"))
-            delta["Burden_Change"] = delta["Burden_prev"] - delta["Burden_future"]
-            merged = delta.merge(current_funding, on="Group")
-            merged["Return"] = merged["Burden_Change"] / merged["Funding"]
-            merged["Lag"] = lag
-            merged["Start_Year"] = year
-            results.append(merged[["Group", "Start_Year", "Lag", "Return"]])
+# Calculate ROI matrix for a specific lag and window
+def compute_roi_matrix(lag=12, window=3):
+    records = []
+    for year in range(1999, 2021 - lag - window):
+        current_funding = funding_grouped[funding_grouped["Year"] == year].copy()
+        impact_years = list(range(year + lag, year + lag + window + 1))
+        burden_window = burden_grouped[burden_grouped["Year"].isin(impact_years)]
+        burden_avg = burden_window.groupby("Group")["Burden"].mean().reset_index()
+        burden_prev = burden_grouped[burden_grouped["Year"] == (year + lag - 1)]
+        delta = burden_prev.merge(burden_avg, on="Group", suffixes=("_prev", "_future"))
+        delta["Burden_Change"] = delta["Burden_prev"] - delta["Burden_future"]
+        merged = delta.merge(current_funding, on="Group")
+        merged["Return"] = merged["Burden_Change"] / merged["Funding"]
+        merged["Start_Year"] = year
+        records.append(merged[["Group", "Start_Year", "Return"]])
+    df = pd.concat(records)
+    pivot = df.pivot(index="Start_Year", columns="Group", values="Return").dropna(axis=1, how="any")
+    return pivot
 
-roi_df = pd.concat(results, ignore_index=True)
-roi_stats = roi_df.groupby(["Group", "Lag"])["Return"].agg(Mean_Return="mean", Std_Dev="std").reset_index()
-roi_stats["Stability_Score"] = roi_stats["Mean_Return"] / roi_stats["Std_Dev"]
+# Efficient Frontier Optimization
+def efficient_frontier(roi_matrix):
+    mu = roi_matrix.mean().values
+    Sigma = roi_matrix.cov().values
+    n = len(mu)
+
+    w = cp.Variable(n)
+    risk = cp.quad_form(w, Sigma)
+    ret = mu @ w
+
+    prob = cp.Problem(cp.Maximize(ret - 0.1 * risk),
+                      [cp.sum(w) == 1, w >= 0])
+    prob.solve()
+
+    return roi_matrix.columns, w.value, mu, Sigma
 
 # Streamlit UI
 st.title("NIH Efficient Frontier Explorer - Bisias Framework")
 st.markdown("Explore return on NIH investments grouped by disease category.")
 
-st.sidebar.header("Filters")
-groups = sorted(roi_stats["Group"].unique())
-selected_groups = st.sidebar.multiselect("Select Disease Groups", options=groups, default=groups)
-lag_range = st.sidebar.slider("Lag Range", min_value=9, max_value=16, value=(9, 16))
+roi_matrix = compute_roi_matrix(lag=12, window=3)
+labels, weights, mean_returns, cov_matrix = efficient_frontier(roi_matrix)
 
-filtered = roi_stats[(roi_stats["Group"].isin(selected_groups)) & (roi_stats["Lag"].between(*lag_range))]
+st.subheader("Efficient Portfolio Weights")
+portfolio_df = pd.DataFrame({"Group": labels, "Weight": weights})
+st.dataframe(portfolio_df.sort_values(by="Weight", ascending=False))
 
-st.subheader("Mean Return vs Lag")
-fig1, ax1 = plt.subplots(figsize=(10, 5))
-for group in filtered["Group"].unique():
-    df_g = filtered[filtered["Group"] == group]
-    ax1.plot(df_g["Lag"], df_g["Mean_Return"], marker='o', label=group)
-ax1.axhline(0, color='gray', linestyle='--')
-ax1.set_xlabel("Lag (Years)")
-ax1.set_ylabel("Mean Return")
-ax1.set_title("Mean Return by Lag")
-ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-ax1.grid(True)
-st.pyplot(fig1)
-
-st.subheader("Risk (Standard Deviation) vs Lag")
-fig2, ax2 = plt.subplots(figsize=(10, 5))
-for group in filtered["Group"].unique():
-    df_g = filtered[filtered["Group"] == group]
-    ax2.plot(df_g["Lag"], df_g["Std_Dev"], marker='s', label=group)
-ax2.set_xlabel("Lag (Years)")
-ax2.set_ylabel("Standard Deviation")
-ax2.set_title("Risk by Lag")
-ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-ax2.grid(True)
-st.pyplot(fig2)
+st.subheader("Efficient Frontier Scatter Plot")
+fig, ax = plt.subplots()
+risks = np.sqrt(np.diag(cov_matrix))
+ax.scatter(risks, mean_returns)
+for i, label in enumerate(labels):
+    ax.annotate(label, (risks[i], mean_returns[i]))
+ax.set_xlabel("Risk (Std Dev)")
+ax.set_ylabel("Mean Return")
+ax.set_title("Risk vs Return by Disease Group")
+st.pyplot(fig)
 
 st.download_button(
-    label="Download Filtered Data as CSV",
-    data=filtered.to_csv(index=False),
-    file_name="filtered_bisias_roi_stats.csv",
+    label="Download Efficient Portfolio as CSV",
+    data=portfolio_df.to_csv(index=False),
+    file_name="efficient_portfolio.csv",
     mime="text/csv"
 )
