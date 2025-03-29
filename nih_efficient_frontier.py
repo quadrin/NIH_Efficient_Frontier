@@ -1,73 +1,5 @@
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-@st.cache_data
-
-def load_data():
-    url = "https://raw.githubusercontent.com/quadrin/NIH_Efficient_Frontier/main/roi_stats.csv"
-    return pd.read_csv(url)
-
-roi_stats = load_data()
-
-# Sidebar Controls
-st.sidebar.header("Filters")
-institutes = sorted(roi_stats["Institute"].unique())
-selected_institutes = st.sidebar.multiselect("Select Institutes", options=institutes, default=institutes)
-lag_range = st.sidebar.slider("Lag Range", min_value=9, max_value=16, value=(9, 16))
-
-# Filter data based on selection
-filtered_data = roi_stats[
-    (roi_stats["Institute"].isin(selected_institutes)) &
-    (roi_stats["Lag"].between(*lag_range))
-]
-
-# App Layout
-st.title("NIH Risk-Return Sensitivity Explorer")
-
-st.markdown("""
-Visualize how return (burden reduction per $), risk (standard deviation), and stability score vary by lag and institute.
-""")
-
-# Plot Mean Return
-st.subheader("Mean Return vs Lag")
-fig1, ax1 = plt.subplots(figsize=(10, 5))
-for inst in filtered_data["Institute"].unique():
-    data = filtered_data[filtered_data["Institute"] == inst]
-    ax1.plot(data["Lag"], data["Mean_Return"], marker='o', label=inst)
-ax1.axhline(0, color='gray', linestyle='--')
-ax1.set_title("Mean Return by Lag")
-ax1.set_xlabel("Lag (Years)")
-ax1.set_ylabel("Mean Return")
-ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-ax1.grid(True)
-st.pyplot(fig1)
-
-# Plot Risk
-st.subheader("Risk (Std Dev) vs Lag")
-fig2, ax2 = plt.subplots(figsize=(10, 5))
-for inst in filtered_data["Institute"].unique():
-    data = filtered_data[filtered_data["Institute"] == inst]
-    ax2.plot(data["Lag"], data["Std_Dev"], marker='s', label=inst)
-ax2.set_title("Standard Deviation of Return by Lag")
-ax2.set_xlabel("Lag (Years)")
-ax2.set_ylabel("Standard Deviation")
-ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-ax2.grid(True)
-st.pyplot(fig2)
-
-# Optional: download
-st.download_button(
-    label="Download Filtered Data as CSV",
-    data=filtered_data.to_csv(index=False),
-    file_name="filtered_roi_stats.csv",
-    mime="text/csv"
-)  
-
-
-import streamlit as st
-import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -75,9 +7,8 @@ import seaborn as sns
 @st.cache_data
 
 def load_data():
-    base = "https://raw.githubusercontent.com/quadrin/NIH_Efficient_Frontier/main/"
-    funding = pd.read_csv(base + "NIH_Funding_Since_1999.csv")
-    yll = pd.read_csv(base + "CDC%20WONDER%20-%20Underlying%20Cause%20of%20Death.csv")
+    funding = pd.read_csv("https://raw.githubusercontent.com/quadrin/NIH_Efficient_Frontier/refs/heads/main/NIH_Funding_Since_1999.csv")
+    yll = pd.read_csv("https://raw.githubusercontent.com/quadrin/NIH_Efficient_Frontier/refs/heads/main/CDC%20WONDER%20-%20Underlying%20Cause%20of%20Death.csv")
     return funding, yll
 
 funding_df, yll_df = load_data()
