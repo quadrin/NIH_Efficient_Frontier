@@ -38,9 +38,9 @@ icd_to_nih = {
 
 # Normalize and map YLL data
 yll_df["Population"] = pd.to_numeric(yll_df["Population"], errors="coerce")
-pop_2005 = yll_df[yll_df["Year"] == 2005].groupby("ICD Chapter")["Population"].mean().dropna().to_dict()
-yll_df["Population_2005"] = yll_df["ICD Chapter"].map(pop_2005)
-yll_df["Norm_Burden"] = yll_df["Deaths"] / yll_df["Population_2005"]
+pop_1999 = yll_df[yll_df["Year"] == 1999].groupby("ICD Chapter")["Population"].mean().dropna().to_dict()
+yll_df["Population_1999"] = yll_df["ICD Chapter"].map(pop_1999)
+yll_df["Norm_Burden"] = yll_df["Deaths"] / yll_df["Population_1999"]
 yll_df.dropna(subset=["Norm_Burden"], inplace=True)
 yll_df["Institute"] = yll_df["ICD Chapter"].map(icd_to_nih)
 yll_df.dropna(subset=["Institute"], inplace=True)
