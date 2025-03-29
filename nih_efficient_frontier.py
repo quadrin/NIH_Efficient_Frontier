@@ -1,59 +1,86 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# Load data from GitHub raw URLs
-base_url = "https://raw.githubusercontent.com/quadrin/NIH_Efficient_Frontier/main/"
-dfs = {
-    "total_deaths": pd.read_csv(base_url + "CDC%20WONDER%20-%20Total%20Deaths.csv"),
-    "underlying_cause": pd.read_csv(base_url + "CDC%20WONDER%20-%20Underlying%20Cause%20of%20Death.csv"),
-    "nih_funding": pd.read_csv(base_url + "NIH_Funding_Since_1999.csv"),
-    "gdp_growth": pd.read_csv(base_url + "US%20GDP%20Growth%20(%25)%20YoY.csv")
+@st.cache_data
+
+def load_data():
+    base = "https://raw.githubusercontent.com/quadrin/NIH_Efficient_Frontier/main/"
+    funding = pd.read_csv(base + "NIH_Funding_Since_1999.csv")
+    yll = pd.read_csv(base + "CDC%20WONDER%20-%20Underlying%20Cause%20of%20Death.csv")
+    return funding, yll
+
+funding_df, yll_df = load_data()
+
+# --- Melt and clean funding data ---
+funding_long = funding_df.melt(id_vars="Fiscal Years", var_name="Year", value_name="Funding")
+funding_long.rename(columns={"Fiscal Years": "Institute"}, inplace=True)
+funding_long["Year"] = funding_long["Year"].astype(int)
+funding_long["Funding"] = pd.to_numeric(funding_long["Funding"], errors="coerce")
+funding_long.dropna(subset=["Funding"], inplace=True)
+
+# --- Clean YLL data and map to NIH institutes ---
+icd_map = {
+    "Neoplasms": "NCI",
+    "Diseases of the circulatory system": "NHLBI",
+    "Diseases of the respiratory system": "NHLBI",
+    "Endocrine, nutritional and metabolic diseases": "NIDDK",
+    "Diseases of the nervous system": "NINDS",
+    "Mental and behavioural disorders": "NIMH",
+    "Diseases of the genitourinary system": "NIDDK",
+    "Diseases of the digestive system": "NIDDK",
+    "Diseases of the musculoskeletal system and connective tissue": "NIAMS",
+    "Diseases of the skin and subcutaneous tissue": "NIAMS",
+    "Certain infectious and parasitic diseases": "NIAID",
+    "Diseases of the blood and blood-forming organs": "NHLBI",
+    "Diseases of the eye and adnexa": "NEI",
+    "Diseases of the ear and mastoid process": "NIDCD",
+    "Congenital malformations, deformations and chromosomal abnormalities": "NICHD",
+    "Certain conditions originating in the perinatal period": "NICHD",
+    "Pregnancy, childbirth and the puerperium": "NICHD",
+    "Symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified": "NINDS",
 }
 
-# Placeholder sensitivity dataset: replace with actual logic from joined/processed data
-# For demo, use underlying_cause
-sensitivity_df = dfs["underlying_cause"]
+yll_agg = yll_df.groupby(["ICD Chapter", "Year"])['Deaths'].sum().reset_index()
+yll_agg["Institute"] = yll_agg["ICD Chapter"].map(icd_map)
+yll_agg.dropna(subset=["Institute"], inplace=True)
+burden = yll_agg.groupby(["Institute", "Year"])['Deaths'].sum().reset_index().rename(columns={"Deaths": "Burden"})
 
-# Sidebar controls
-st.sidebar.header("Controls")
-selected_institutes = st.sidebar.multiselect(
-    "Select NIH Institutes to Display",
-    options=sensitivity_df["Institute"].unique() if "Institute" in sensitivity_df else [],
-    default=sensitivity_df["Institute"].unique() if "Institute" in sensitivity_df else []
-)
+# --- Calculate return with lag ---
+funding_long["Impact_Year"] = funding_long["Year"] + 10
+df = funding_long.merge(burden, left_on=["Institute", "Impact_Year"], right_on=["Institute", "Year"], suffixes=("_Funding", "_Burden"))
+df.sort_values(by=["Institute", "Impact_Year"], inplace=True)
+df["Prev_Burden"] = df.groupby("Institute")["Burden"].shift(1)
+df["Burden_Change"] = df["Prev_Burden"] - df["Burden"]
+df["Return"] = df["Burden_Change"] / df["Funding"]
+df.dropna(subset=["Return"], inplace=True)
 
-lag_min, lag_max = st.sidebar.slider("Select Lag Range (Years)", min_value=5, max_value=15, value=(5, 15))
+# --- Portfolio: Risk vs Return ---
+returns_matrix = df.pivot(index="Impact_Year", columns="Institute", values="Return").dropna(axis=1)
+mean_returns = returns_matrix.mean()
+risk = returns_matrix.std()
+summary = pd.DataFrame({"Mean Return": mean_returns, "Risk": risk}).sort_values("Mean Return", ascending=False)
 
-# Filter data
-if "Institute" in sensitivity_df:
-    filtered_df = sensitivity_df[
-        (sensitivity_df["Institute"].isin(selected_institutes)) &
-        (sensitivity_df["Lag"].between(lag_min, lag_max))
-    ]
+# --- Streamlit App ---
+st.title("NIH Efficient Frontier Explorer")
 
-    # Pivot for heatmap
-    heatmap_data = filtered_df.pivot(index="Institute", columns="Lag", values="Correlation_with_Burden")
+st.markdown("""
+This app calculates and visualizes the risk-return profile of NIH institutes based on historical funding and disease burden
+(from CDC WONDER). A 10-year lag is applied between investment and outcome.
+""")
 
-    # Display heatmap
-    st.title("NIH Funding vs Healthcare Burden Sensitivity Analysis")
-    st.markdown("""
-    Use the sliders and multiselect to explore how the correlation between NIH funding and downstream healthcare burden 
-    changes based on lag assumptions.
-    """)
+st.subheader("NIH Institute Risk vs Return")
+fig, ax = plt.subplots(figsize=(10, 6))
+ax.scatter(summary["Risk"], summary["Mean Return"], s=100)
+for label in summary.index:
+    ax.annotate(label, (summary.loc[label, "Risk"], summary.loc[label, "Mean Return"]))
+ax.set_xlabel("Risk (Standard Deviation of Return)")
+ax.set_ylabel("Mean Return (Burden Reduction per $)")
+ax.set_title("NIH Portfolio Risk vs Return")
+ax.grid(True)
+st.pyplot(fig)
 
-    fig, ax = plt.subplots(figsize=(10, 6))
-    sns.heatmap(heatmap_data, annot=True, center=0, cmap="coolwarm", fmt=".2f", linewidths=0.5, ax=ax, 
-                cbar_kws={'label': 'Correlation'})
-    plt.title("Correlation Heatmap: NIH Funding vs Burden by Lag")
-    st.pyplot(fig)
-
-    st.download_button(
-        label="Download Filtered Data as CSV",
-        data=filtered_df.to_csv(index=False),
-        file_name="filtered_sensitivity_data.csv",
-        mime="text/csv"
-    )
-else:
-    st.warning("The uploaded dataset does not include 'Institute' and 'Lag' columns. Please preprocess accordingly.")
+st.subheader("Raw Portfolio Table")
+st.dataframe(summary.reset_index())
