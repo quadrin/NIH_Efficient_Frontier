@@ -1,5 +1,73 @@
 import streamlit as st
 import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+@st.cache_data
+
+def load_data():
+    url = "https://raw.githubusercontent.com/quadrin/NIH_Efficient_Frontier/main/roi_stats.csv"
+    return pd.read_csv(url)
+
+roi_stats = load_data()
+
+# Sidebar Controls
+st.sidebar.header("Filters")
+institutes = sorted(roi_stats["Institute"].unique())
+selected_institutes = st.sidebar.multiselect("Select Institutes", options=institutes, default=institutes)
+lag_range = st.sidebar.slider("Lag Range", min_value=9, max_value=16, value=(9, 16))
+
+# Filter data based on selection
+filtered_data = roi_stats[
+    (roi_stats["Institute"].isin(selected_institutes)) &
+    (roi_stats["Lag"].between(*lag_range))
+]
+
+# App Layout
+st.title("NIH Risk-Return Sensitivity Explorer")
+
+st.markdown("""
+Visualize how return (burden reduction per $), risk (standard deviation), and stability score vary by lag and institute.
+""")
+
+# Plot Mean Return
+st.subheader("Mean Return vs Lag")
+fig1, ax1 = plt.subplots(figsize=(10, 5))
+for inst in filtered_data["Institute"].unique():
+    data = filtered_data[filtered_data["Institute"] == inst]
+    ax1.plot(data["Lag"], data["Mean_Return"], marker='o', label=inst)
+ax1.axhline(0, color='gray', linestyle='--')
+ax1.set_title("Mean Return by Lag")
+ax1.set_xlabel("Lag (Years)")
+ax1.set_ylabel("Mean Return")
+ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+ax1.grid(True)
+st.pyplot(fig1)
+
+# Plot Risk
+st.subheader("Risk (Std Dev) vs Lag")
+fig2, ax2 = plt.subplots(figsize=(10, 5))
+for inst in filtered_data["Institute"].unique():
+    data = filtered_data[filtered_data["Institute"] == inst]
+    ax2.plot(data["Lag"], data["Std_Dev"], marker='s', label=inst)
+ax2.set_title("Standard Deviation of Return by Lag")
+ax2.set_xlabel("Lag (Years)")
+ax2.set_ylabel("Standard Deviation")
+ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+ax2.grid(True)
+st.pyplot(fig2)
+
+# Optional: download
+st.download_button(
+    label="Download Filtered Data as CSV",
+    data=filtered_data.to_csv(index=False),
+    file_name="filtered_roi_stats.csv",
+    mime="text/csv"
+)  
+
+
+import streamlit as st
+import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -43,44 +111,83 @@ icd_map = {
     "Symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified": "NINDS",
 }
 
-yll_agg = yll_df.groupby(["ICD Chapter", "Year"])['Deaths'].sum().reset_index()
-yll_agg["Institute"] = yll_agg["ICD Chapter"].map(icd_map)
-yll_agg.dropna(subset=["Institute"], inplace=True)
-burden = yll_agg.groupby(["Institute", "Year"])['Deaths'].sum().reset_index().rename(columns={"Deaths": "Burden"})
+yll_df["Population"] = pd.to_numeric(yll_df["Population"], errors="coerce")
+pop_2005 = yll_df[yll_df["Year"] == 2005].groupby("ICD Chapter")["Population"].mean().dropna().to_dict()
+yll_df["Population_2005"] = yll_df["ICD Chapter"].map(pop_2005)
+yll_df["Norm_Burden"] = yll_df["Deaths"] / yll_df["Population_2005"]
+yll_df.dropna(subset=["Norm_Burden"], inplace=True)
+yll_df["Institute"] = yll_df["ICD Chapter"].map(icd_map)
+yll_df.dropna(subset=["Institute"], inplace=True)
+burden_normalized = yll_df.groupby(["Year", "Institute"])["Norm_Burden"].sum().reset_index().rename(columns={"Norm_Burden": "Burden"})
 
-# --- Calculate return with lag ---
-funding_long["Impact_Year"] = funding_long["Year"] + 10
-df = funding_long.merge(burden, left_on=["Institute", "Impact_Year"], right_on=["Institute", "Year"], suffixes=("_Funding", "_Burden"))
-df.sort_values(by=["Institute", "Impact_Year"], inplace=True)
-df["Prev_Burden"] = df.groupby("Institute")["Burden"].shift(1)
-df["Burden_Change"] = df["Prev_Burden"] - df["Burden"]
-df["Return"] = df["Burden_Change"] / df["Funding"]
-df.dropna(subset=["Return"], inplace=True)
+# --- Calculate return using lag window ---
+results = []
+for lag in range(9, 17):
+    for window in range(1, 6):
+        for year in range(1999, 2021 - lag - window):
+            current_funding = funding_long[funding_long["Year"] == year].copy()
+            impact_years = list(range(year + lag, year + lag + window + 1))
+            burden_window = burden_normalized[burden_normalized["Year"].isin(impact_years)]
+            burden_avg = burden_window.groupby("Institute")["Burden"].mean().reset_index()
+            burden_prev = burden_normalized[burden_normalized["Year"] == (year + lag - 1)]
+            delta = burden_prev.merge(burden_avg, on="Institute", suffixes=("_prev", "_future"))
+            delta["Burden_Change"] = delta["Burden_prev"] - delta["Burden_future"]
+            merged = delta.merge(current_funding, on="Institute")
+            merged["Return"] = merged["Burden_Change"] / merged["Funding"]
+            merged["Lag"] = lag
+            merged["Start_Year"] = year
+            results.append(merged[["Institute", "Start_Year", "Lag", "Return"]])
 
-# --- Portfolio: Risk vs Return ---
-returns_matrix = df.pivot(index="Impact_Year", columns="Institute", values="Return").dropna(axis=1)
-mean_returns = returns_matrix.mean()
-risk = returns_matrix.std()
-summary = pd.DataFrame({"Mean Return": mean_returns, "Risk": risk}).sort_values("Mean Return", ascending=False)
+roi_df = pd.concat(results, ignore_index=True)
+roi_stats = roi_df.groupby(["Institute", "Lag"])["Return"].agg(Mean_Return="mean", Std_Dev="std").reset_index()
+roi_stats["Stability_Score"] = roi_stats["Mean_Return"] / roi_stats["Std_Dev"]
 
 # --- Streamlit App ---
 st.title("NIH Efficient Frontier Explorer")
-
 st.markdown("""
-This app calculates and visualizes the risk-return profile of NIH institutes based on historical funding and disease burden
-(from CDC WONDER). A 10-year lag is applied between investment and outcome.
+Explore the lag-adjusted return on NIH investments using CDC burden data. 
 """)
 
-st.subheader("NIH Institute Risk vs Return")
-fig, ax = plt.subplots(figsize=(10, 6))
-ax.scatter(summary["Risk"], summary["Mean Return"], s=100)
-for label in summary.index:
-    ax.annotate(label, (summary.loc[label, "Risk"], summary.loc[label, "Mean Return"]))
-ax.set_xlabel("Risk (Standard Deviation of Return)")
-ax.set_ylabel("Mean Return (Burden Reduction per $)")
-ax.set_title("NIH Portfolio Risk vs Return")
-ax.grid(True)
-st.pyplot(fig)
+# Sidebar Controls
+st.sidebar.header("Filters")
+institutes = sorted(roi_stats["Institute"].unique())
+selected_institutes = st.sidebar.multiselect("Select Institutes", options=institutes, default=institutes)
+lag_range = st.sidebar.slider("Lag Range", min_value=9, max_value=16, value=(9, 16))
 
-st.subheader("Raw Portfolio Table")
-st.dataframe(summary.reset_index())
+# Filtered view
+filtered = roi_stats[(roi_stats["Institute"].isin(selected_institutes)) & (roi_stats["Lag"].between(*lag_range))]
+
+# Plot Mean Return
+st.subheader("Mean Return vs Lag")
+fig1, ax1 = plt.subplots(figsize=(10, 5))
+for inst in filtered["Institute"].unique():
+    df_inst = filtered[filtered["Institute"] == inst]
+    ax1.plot(df_inst["Lag"], df_inst["Mean_Return"], marker='o', label=inst)
+ax1.axhline(0, color='gray', linestyle='--')
+ax1.set_xlabel("Lag (Years)")
+ax1.set_ylabel("Mean Return")
+ax1.set_title("Mean Return by Lag")
+ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+ax1.grid(True)
+st.pyplot(fig1)
+
+# Plot Risk
+st.subheader("Risk (Standard Deviation) vs Lag")
+fig2, ax2 = plt.subplots(figsize=(10, 5))
+for inst in filtered["Institute"].unique():
+    df_inst = filtered[filtered["Institute"] == inst]
+    ax2.plot(df_inst["Lag"], df_inst["Std_Dev"], marker='s', label=inst)
+ax2.set_xlabel("Lag (Years)")
+ax2.set_ylabel("Standard Deviation")
+ax2.set_title("Risk by Lag")
+ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+ax2.grid(True)
+st.pyplot(fig2)
+
+# Download button
+st.download_button(
+    label="Download Filtered Data as CSV",
+    data=filtered.to_csv(index=False),
+    file_name="filtered_roi_stats.csv",
+    mime="text/csv"
+)  
